@@ -1,0 +1,272 @@
+/***************************************************************
+ * Complete: QMI8658 Accelerometer + Adafruit_ST7789 scrolling graph
+ * - Full pin definitions for Adafruit ESP32-S3 TFT Feather
+ * - Uses Adafruit_ST7789 (no library change)
+ * - Graph area: (0,25) size 240x110
+ * - Behavior:
+ *   1) Initially fill left -> right
+ *   2) When full, memmove left (scroll) and append new sample on right
+ * - Calibration: auto at startup, re-cal via Serial "cal"
+ * - Includes function prototypes for VSCode/PlatformIO
+ ***************************************************************/
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <QMI8658.h>
+#include <math.h>
+
+// ---------------- Function prototypes ----------------
+void performCalibration();
+int accelToY(float v);
+void drawBufferedGraph(float *buffer, uint16_t color);
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b);
+
+// ---------------- TFT pins (Adafruit ESP32-S3 TFT Feather) ----------------
+#define TFT_MISO 37
+#define TFT_MOSI 35
+#define TFT_SCLK 36
+#define TFT_CS   7
+#define TFT_DC   39
+#define TFT_RST  40
+#define TFT_BL   45
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// ---------------- IMU (QMI8658) ----------------
+#define SDA_PIN 42
+#define SCL_PIN 41
+QMI8658 imu;
+
+// ---------------- Graph area (user requested) ----------------
+const int graphX = 0;
+const int graphY = 25;
+const int graphW = 240;
+const int graphH = 110;
+
+// ---------------- Buffers and vars ----------------
+// buffers length = graphW (one sample per column)
+float bufX[graphW];
+float bufY[graphW];
+float bufZ[graphW];
+int graphIndex = 0; // how many columns filled initially (0..graphW)
+
+bool imuReady = false;
+bool calibrated = false;
+
+// Filtering / offsets
+const float alpha = 0.12f;
+float fX = 0, fY = 0, fZ = 0;
+float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
+
+// colors
+const uint16_t DARKGREY = rgb565(80, 80, 80);
+
+// ---------------- Setup ----------------
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 2000) { /* wait a short while if needed */ }
+
+  // SPI init (use explicit pins)
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH); // backlight on
+
+  // tft init (match Adafruit Feather example)
+  tft.init(135, 240); // controller width,height parameters used previously
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+
+  // Top text
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(10, 5);
+  tft.print("Calibration OK"); // will be overwritten by performCalibration()
+
+  // Draw graph border and clear inside
+  tft.drawRect(graphX, graphY, graphW, graphH, ST77XX_WHITE);
+  tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
+
+  // init buffers to 0
+  for (int i = 0; i < graphW; ++i) {
+    bufX[i] = 0;
+    bufY[i] = 0;
+    bufZ[i] = 0;
+  }
+
+  // IMU init
+  if (!imu.begin(SDA_PIN, SCL_PIN)) {
+    tft.setTextColor(ST77XX_RED);
+    tft.setCursor(10, 30);
+    tft.print("IMU Init FAIL!");
+    imuReady = false;
+    while (1) delay(500); // halt
+  } else {
+    imuReady = true;
+    imu.setAccelRange(QMI8658_ACCEL_RANGE_8G);
+    imu.setAccelODR(QMI8658_ACCEL_ODR_1000HZ);
+    imu.setAccelUnit_mps2(true);
+    imu.enableSensors(QMI8658_ENABLE_ACCEL | QMI8658_ENABLE_GYRO);
+  }
+
+  // Auto calibration at startup
+  performCalibration();
+
+  // small helper text
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(5, graphY + graphH + 4);
+  tft.print("Serial: type 'cal' to recalibrate");
+}
+
+// ---------------- Loop ----------------
+void loop() {
+  // allow re-calibration via serial
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.equalsIgnoreCase("cal") || cmd.equalsIgnoreCase("calibrate")) {
+      performCalibration();
+    }
+  }
+
+  if (!imuReady) {
+    delay(100);
+    return;
+  }
+
+  QMI8658_Data d;
+  if (!imu.readSensorData(d)) {
+    // read failed; small delay and continue
+    delay(5);
+    return;
+  }
+
+  // apply offsets and low-pass filter
+  float ax = d.accelX - accelOffsetX;
+  float ay = d.accelY - accelOffsetY;
+  float az = d.accelZ - accelOffsetZ;
+
+  fX = alpha * ax + (1 - alpha) * fX;
+  fY = alpha * ay + (1 - alpha) * fY;
+  fZ = alpha * az + (1 - alpha) * fZ;
+
+  // ---------- buffer update: initial fill (left->right) then scroll ----------
+  if (graphIndex < graphW) {
+    // fill phase: write into increasing columns
+    bufX[graphIndex] = fX;
+    bufY[graphIndex] = fY;
+    bufZ[graphIndex] = fZ;
+    graphIndex++;
+  } else {
+    // scroll phase: shift left by 1 and append new sample at right
+    memmove(bufX, bufX + 1, sizeof(float) * (graphW - 1));
+    memmove(bufY, bufY + 1, sizeof(float) * (graphW - 1));
+    memmove(bufZ, bufZ + 1, sizeof(float) * (graphW - 1));
+    bufX[graphW - 1] = fX;
+    bufY[graphW - 1] = fY;
+    bufZ[graphW - 1] = fZ;
+  }
+
+  // ---------- draw graph area only (minimize flicker) ----------
+  // Clear inner graph area
+  tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
+
+  // draw midline
+  int midY = graphY + graphH / 2;
+  tft.drawFastHLine(graphX + 1, midY, graphW - 2, DARKGREY);
+
+  // draw X (red), Y (green), Z (blue) - only up to current filled columns
+  int limit = (graphIndex < graphW) ? graphIndex : graphW;
+  if (limit > 1) {
+    drawBufferedGraph(bufX, ST77XX_RED);
+    drawBufferedGraph(bufY, ST77XX_GREEN);
+    drawBufferedGraph(bufZ, ST77XX_BLUE);
+  }
+
+  // draw small dots for latest values on right edge (if filled)
+  if (graphIndex > 0) {
+    int px = graphX + limit - 1;
+    if (px > graphX + graphW - 1) px = graphX + graphW - 1;
+    int pyX = accelToY(bufX[limit - 1]);
+    int pyY = accelToY(bufY[limit - 1]);
+    int pyZ = accelToY(bufZ[limit - 1]);
+    tft.drawPixel(px, pyX, ST77XX_RED);
+    tft.drawPixel(px, pyY, ST77XX_GREEN);
+    tft.drawPixel(px, pyZ, ST77XX_BLUE);
+  }
+
+  // frame timing
+  delay(25); // ~40 Hz refresh; 조정 가능
+}
+
+// ---------------- Helper functions ----------------
+
+// Convert accel value (-10..+10 m/s^2) to Y pixel in graph area
+int accelToY(float v) {
+  const float vmax = 10.0f;
+  const float vmin = -10.0f;
+  if (v > vmax) v = vmax;
+  if (v < vmin) v = vmin;
+  float norm = (v - vmin) / (vmax - vmin); // 0..1
+  int y = graphY + graphH - 1 - (int)(norm * (graphH - 1));
+  return y;
+}
+
+// Draw buffered graph as connected lines (buffer length == graphW)
+// Uses current graphIndex to decide how many columns to draw in fill phase.
+void drawBufferedGraph(float *buffer, uint16_t color) {
+  int limit = (graphIndex < graphW) ? graphIndex : graphW;
+  if (limit < 2) return;
+  for (int i = 1; i < limit; ++i) {
+    int x1 = graphX + (i - 1);
+    int x2 = graphX + i;
+    int y1 = accelToY(buffer[i - 1]);
+    int y2 = accelToY(buffer[i]);
+    tft.drawLine(x1, y1, x2, y2, color);
+  }
+}
+
+// Simple auto-calibration: average N samples while device is stationary/flat
+void performCalibration() {
+  // show message
+  tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+  tft.setCursor(10, 5);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextSize(2);
+  tft.print("Calibrating...");
+
+  const int N = 300;
+  float sx = 0, sy = 0, sz = 0;
+  int cnt = 0;
+  for (int i = 0; i < N; ++i) {
+    QMI8658_Data dd;
+    if (imu.readSensorData(dd)) {
+      sx += dd.accelX;
+      sy += dd.accelY;
+      sz += dd.accelZ;
+      cnt++;
+    }
+    delay(5);
+  }
+  if (cnt > 0) {
+    accelOffsetX = sx / cnt;
+    accelOffsetY = sy / cnt;
+    accelOffsetZ = (sz / cnt) - 9.81f; // remove gravity
+    calibrated = true;
+  }
+
+  // restore top message
+  tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+  tft.setCursor(10, 5);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextSize(2);
+  //tft.print("Calibration OK");
+  tft.print("Red:X, Green:Y, Blue:Z");
+
+}
+
+// 16-bit RGB565 conversion helper
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+  return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
