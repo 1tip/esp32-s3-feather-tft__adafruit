@@ -1,0 +1,161 @@
+/* ==============================================================
+   LCD + QMI8658 Posture Sensor Graph Display (ESP32-S3 TFT Feather)
+   --------------------------------------------------------------
+   - LCD 해상도: 135x240 ST7789
+   - 가속도 X, Y, Z 를 실시간 그래프로 표시
+   ============================================================== */
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <QMI8658.h>
+#include <math.h>
+
+// ---------------- LCD Pins ----------------
+#define TFT_MISO 37
+#define TFT_MOSI 35
+#define TFT_SCLK 36
+#define TFT_CS   7
+#define TFT_DC   39
+#define TFT_RST  40
+#define TFT_BL   45
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// ---------------- IMU Pins ----------------
+#define SDA_PIN 42
+#define SCL_PIN 41
+QMI8658 imu;
+
+// Motion / Calibration / Filter
+float accelOffsetX = 0, accelOffsetY = 0, accelOffsetZ = 0;
+float gyroOffsetX  = 0, gyroOffsetY  = 0, gyroOffsetZ  = 0;
+float filteredAccelX = 0, filteredAccelY = 0, filteredAccelZ = 0;
+const float alpha = 0.12;
+
+// 그래프 관련 변수
+const uint16_t graphX = 0;
+const uint16_t graphY = 60;
+const uint16_t graphW = 240;
+const uint16_t graphH = 75;
+int graphPos = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH); // 백라이트 켜기
+
+  tft.init(135, 240);
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 5);
+  tft.println("Posture Sensor");
+  tft.setCursor(5, 30);
+  tft.println("QMI8658 Graph");
+
+  // IMU 시작
+  if (!imu.begin(SDA_PIN, SCL_PIN)) {
+    tft.setCursor(5, 100);
+    tft.setTextColor(ST77XX_RED);
+    tft.println("IMU Init FAIL!");
+    while (1) delay(1000);
+  }
+
+  imu.setAccelRange(QMI8658_ACCEL_RANGE_8G);
+  imu.setAccelODR(QMI8658_ACCEL_ODR_1000HZ);
+  imu.enableSensors(QMI8658_ENABLE_ACCEL | QMI8658_ENABLE_GYRO);
+  imu.setAccelUnit_mps2(true);
+
+  performCalibration();   // 기존 보정함수 그대로 사용
+
+  // 그래프 영역 표시
+  tft.drawRect(graphX, graphY, graphW, graphH, ST77XX_WHITE);
+}
+
+// IMU 데이터 읽고 그래프 업데이트
+void loop() {
+  QMI8658_Data data;
+  if (imu.readSensorData(data)) {
+    float ax = (data.accelX - accelOffsetX);
+    float ay = (data.accelY - accelOffsetY);
+    float az = (data.accelZ - accelOffsetZ);
+
+    // low-pass filter
+    filteredAccelX = alpha * ax + (1 - alpha) * filteredAccelX;
+    filteredAccelY = alpha * ay + (1 - alpha) * filteredAccelY;
+    filteredAccelZ = alpha * az + (1 - alpha) * filteredAccelZ;
+
+    drawGraph(filteredAccelX, filteredAccelY, filteredAccelZ);
+  }
+
+  if (Serial.available()) {
+    String cmd = Serial.readString();
+    cmd.trim();
+    if (cmd == "cal") {
+      performCalibration();
+    }
+  }
+
+  delay(50); // 그래프 속도
+}
+
+/* -------------------- 그래프 표시 함수 -------------------- */
+void drawGraph(float x, float y, float z) {
+  if (graphPos >= graphW - 1) {
+    tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
+    graphPos = 0;
+  }
+
+  // y 범위 변환 (가속도 -10~10m/s² → 0~75 px)
+  auto mapG = [](float v) {
+    v = constrain(v, -10, 10);
+    return (int)(graphY + graphH/2 - (v * (graphH / 20.0)));
+  };
+
+  int px = graphX + graphPos;
+  int pyX = mapG(x);
+  int pyY = mapG(y);
+  int pyZ = mapG(z);
+
+  // 이전 픽셀 지우기 대신 덮어쓰기
+  tft.drawPixel(px, pyX, ST77XX_RED);
+  tft.drawPixel(px, pyY, ST77XX_GREEN);
+  tft.drawPixel(px, pyZ, ST77XX_BLUE);
+
+  graphPos++;
+}
+
+/* -------------------- 보정 함수 (원본 유지) -------------------- */
+void performCalibration() {
+  tft.fillRect(0, 110, 240, 25, ST77XX_BLACK);
+  tft.setCursor(5, 110);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.println("Calibrating...");
+
+  const int numSamples = 400;
+  float sx = 0, sy = 0, sz = 0;
+  for (int i = 0; i < numSamples; i++) {
+    QMI8658_Data d;
+    if (imu.readSensorData(d)) {
+      sx += d.accelX;
+      sy += d.accelY;
+      sz += d.accelZ;
+    }
+    delay(5);
+  }
+
+  accelOffsetX = sx / numSamples;
+  accelOffsetY = sy / numSamples;
+  accelOffsetZ = (sz / numSamples) - 9.81;
+
+  tft.fillRect(0, 110, 240, 25, ST77XX_BLACK);
+  tft.setCursor(5, 110);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.println("Calibration OK");
+}
