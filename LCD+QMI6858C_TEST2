@@ -39,10 +39,10 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 QMI8658 imu;
 
 // ---------------- Graph area (user requested) ----------------
-const int graphX = 0;
-const int graphY = 25;
-const int graphW = 240;
-const int graphH = 110;
+const int graphX = 2;
+const int graphY = 23;
+const int graphW = 238;
+const int graphH = 108;
 
 // ---------------- Buffers and vars ----------------
 // buffers length = graphW (one sample per column)
@@ -64,8 +64,8 @@ const uint16_t DARKGREY = rgb565(80, 80, 80);
 
 // ---------------- Setup ----------------
 void setup() {
-  Serial.begin(115200);
-  while (!Serial && millis() < 2000) { /* wait a short while if needed */ }
+  //Serial.begin(115200);
+  //while (!Serial && millis() < 2000) { /* wait a short while if needed */ }
 
   // SPI init (use explicit pins)
   SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
@@ -80,12 +80,13 @@ void setup() {
   // Top text
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(10, 5);
-  tft.print("Calibration OK"); // will be overwritten by performCalibration()
+  //tft.setCursor(10, 5);
+  //tft.setCursor(0, 0);
+  //tft.print("Calibration OK"); // will be overwritten by performCalibration()
 
   // Draw graph border and clear inside
-  tft.drawRect(graphX, graphY, graphW, graphH, ST77XX_WHITE);
-  tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
+  tft.drawRect(graphX-2, graphY-2, graphW+2, graphH+2, ST77XX_WHITE);                     // 그래프 외곽선(박스)
+  //tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
 
   // init buffers to 0
   for (int i = 0; i < graphW; ++i) {
@@ -170,7 +171,9 @@ void loop() {
 
   // ---------- draw graph area only (minimize flicker) ----------
   // Clear inner graph area
-  tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);
+  //tft.fillRect(graphX + 1, graphY + 1, graphW - 2, graphH - 2, ST77XX_BLACK);       // 화면 깜빡임 유발
+  tft.fillRect(graphX+1, graphY+1, graphW-2, graphH-2, ST77XX_BLACK);                 // 화면 깜빡임 유발
+  tft.drawRect(graphX-2, graphY-2, graphW+2, graphH+2, ST77XX_WHITE);                 // 그래프 외곽선(박스)
 
   // draw midline
   int midY = graphY + graphH / 2;
@@ -231,7 +234,7 @@ void drawBufferedGraph(float *buffer, uint16_t color) {
 void performCalibration() {
   // show message
   tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
-  tft.setCursor(10, 5);
+  tft.setCursor(0, 0);
   tft.setTextColor(ST77XX_YELLOW);
   tft.setTextSize(2);
   tft.print("Calibrating...");
@@ -258,12 +261,12 @@ void performCalibration() {
 
   // restore top message
   tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
-  tft.setCursor(10, 5);
+  //tft.setCursor(10, 5);
+  tft.setCursor(0, 0);
   tft.setTextColor(ST77XX_YELLOW);
   tft.setTextSize(2);
   //tft.print("Calibration OK");
-  tft.print("Red:X, Green:Y, Blue:Z");
-
+  tft.print("R:X, G:Y, B:Z");
 }
 
 // 16-bit RGB565 conversion helper
