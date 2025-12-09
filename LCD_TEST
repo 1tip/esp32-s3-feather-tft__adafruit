@@ -1,0 +1,49 @@
+// ArduinoIDE 예제 #1  - LCD 테스트
+
+/* LCD Test — Adafruit ESP32-S3 TFT Feather (핀 매핑 수정 포함) */
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+
+// 실제 보드 핀 (Adafruit ESP32-S3 TFT Feather)
+#define TFT_MISO 37
+#define TFT_MOSI 35
+#define TFT_SCLK 36
+#define TFT_CS   7
+#define TFT_DC   39
+#define TFT_RST  40
+#define TFT_BL   45
+
+// Adafruit_ST7789 생성자: (CS, DC, RST)
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  // SPI 핀을 수동으로 지정하려면 SPI.begin(SCLK, MISO, MOSI);
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
+
+  // 일부 보드(Arduino core 버전에 따라) tft.init() 호출 전에
+  // TFT 전원/제어 핀을 HIGH로 끌어줘야 할 수 있습니다. 문제 시 참고.
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH); // 백라이트 ON
+
+  tft.init(135, 240);   // 디스플레이 해상도
+  tft.setRotation(1);
+
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("ESP32-S3 Feather");
+  tft.setCursor(10, 40);
+  tft.println("TFT LCD Test");
+}
+
+void loop() {
+  tft.fillScreen(ST77XX_RED); delay(300);
+  tft.fillScreen(ST77XX_GREEN); delay(300);
+  tft.fillScreen(ST77XX_BLUE); delay(300);
+}
