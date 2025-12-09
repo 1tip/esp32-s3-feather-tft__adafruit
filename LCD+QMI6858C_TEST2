@@ -266,7 +266,7 @@ void performCalibration() {
   tft.setTextColor(ST77XX_YELLOW);
   tft.setTextSize(2);
   //tft.print("Calibration OK");
-  tft.print("R:X, G:Y, B:Z");
+  tft.print("Red:X,Green:Y,Blue:Z");
 }
 
 // 16-bit RGB565 conversion helper
