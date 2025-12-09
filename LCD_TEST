@@ -1,6 +1,4 @@
-// ArduinoIDE 예제 #1  - LCD 테스트
-
-/* LCD Test — Adafruit ESP32-S3 TFT Feather (핀 매핑 수정 포함) */
+/* LCD Test — Adafruit ESP32-S3 TFT Feather */
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -46,4 +44,7 @@ void loop() {
   tft.fillScreen(ST77XX_RED); delay(300);
   tft.fillScreen(ST77XX_GREEN); delay(300);
   tft.fillScreen(ST77XX_BLUE); delay(300);
+  tft.setCursor(0, 40);
+  tft.println(" ESP32-S3 Feather"); delay(300);
+  tft.println(" TFT LCD Test"); delay(300);
 }
