@@ -3,7 +3,7 @@
  * (BOOT Button 3 sec toggle)
  * Libraries: Adafruit_GFX + Adafruit_ST7789
  * Features:
- *   - 버퍼 기반 스크롤 그래프
+ *   - 버퍼 기반 스크롤 그래프 (점_dot 그래프)
  *   - 깜빡임 최소화
  *   - 부트 시 저장된 캘리브레이션 값 자동 적용
  *   - BOOT 버튼 3초 롱프레스 → 저장/삭제+캘리브레이션 토글
