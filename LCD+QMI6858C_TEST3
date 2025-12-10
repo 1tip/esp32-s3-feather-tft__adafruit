@@ -1,0 +1,358 @@
+/***************************************************************
+ * QMI8658 Accelerometer Graph + Calibration Toggle Save/Delete
+ * (BOOT Button 3 sec toggle)
+ * Libraries: Adafruit_GFX + Adafruit_ST7789
+ * Features:
+ *   - 버퍼 기반 스크롤 그래프
+ *   - 깜빡임 최소화
+ *   - 부트 시 저장된 캘리브레이션 값 자동 적용
+ *   - BOOT 버튼 3초 롱프레스 → 저장/삭제+캘리브레이션 토글
+ ***************************************************************/
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <QMI8658.h>
+#include <Preferences.h>
+#include <math.h>
+
+// ---------- TFT Pins ----------
+#define TFT_MISO 37
+#define TFT_MOSI 35
+#define TFT_SCLK 36
+#define TFT_CS   7
+#define TFT_DC   39
+#define TFT_RST  40
+#define TFT_BL   45
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// ---------- IMU ----------
+#define SDA_PIN 42
+#define SCL_PIN 41
+QMI8658 imu;
+
+// ---------- Pref ----------
+Preferences prefs;
+bool calibLoaded = false;
+bool toggleState = false;  // 저장/삭제 토글
+
+// ---------- BOOT Button ----------
+#define BTN_BOOT 0
+unsigned long pressStart = 0;
+bool pressed = false;
+
+// ---------- Graph Area ----------
+const int graphX = 2;//2;
+const int graphY = 25;//23;
+const int graphW = 238;
+const int graphH = 110;
+
+// ---------- Graph Buffers ----------
+float bufX[graphW];
+float bufY[graphW];
+float bufZ[graphW];
+int graphIndex = 0;
+
+int oldY_X[graphW];
+int oldY_Y[graphW];
+int oldY_Z[graphW];
+bool firstFrame = true;
+
+// ---------- Filter + Calibration ----------
+const float alpha = 0.12f;
+float fX = 0, fY = 0, fZ = 0;
+
+float accelOffsetX = 0;
+float accelOffsetY = 0;
+float accelOffsetZ = 0;
+
+// ---------- RGB Helper ----------
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+  return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+const uint16_t DARKGREY = rgb565(80, 80, 80);
+
+// ---------- accel → Y pixel ----------
+int accelToY(float v) {
+  const float vmax = 10.0f;
+  const float vmin = -10.0f;
+  if (v > vmax) v = vmax;
+  if (v < vmin) v = vmin;
+
+  float norm = (v - vmin) / (vmax - vmin);
+  int y = graphY + graphH - 1 - (int)(norm * (graphH - 1));
+
+  if (y < graphY + 1) y = graphY + 1;
+  if (y > graphY + graphH - 2) y = graphY + graphH - 2;
+  return y;
+}
+
+// ---------- Save Calibration ----------
+void saveCalibration() {
+  prefs.begin("calib", false);
+  prefs.putFloat("ox", accelOffsetX);
+  prefs.putFloat("oy", accelOffsetY);
+  prefs.putFloat("oz", accelOffsetZ);
+  prefs.end();
+}
+
+// ---------- Delete Calibration ----------
+void deleteCalibration() {
+  prefs.begin("calib", false);
+  prefs.clear();
+  prefs.end();
+}
+
+// ---------- Load Calibration ----------
+void loadCalibration() {
+  prefs.begin("calib", true);
+  if (prefs.isKey("ox")) {
+    accelOffsetX = prefs.getFloat("ox");
+    accelOffsetY = prefs.getFloat("oy");
+    accelOffsetZ = prefs.getFloat("oz");
+    calibLoaded = true;
+  }
+  prefs.end();
+}
+
+// ---------- Calibration ----------
+void performCalibration() {
+  tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.print("Calibrating...");
+
+  const int N = 300;
+  float sx = 0, sy = 0, sz = 0;
+  int cnt = 0;
+
+  for (int i = 0; i < N; i++) {
+    QMI8658_Data d;
+    if (imu.readSensorData(d)) {
+      sx += d.accelX;
+      sy += d.accelY;
+      sz += d.accelZ;
+      cnt++;
+    }
+    delay(5);
+  }
+
+  if (cnt > 0) {
+    accelOffsetX = sx / cnt;
+    accelOffsetY = sy / cnt;
+    accelOffsetZ = (sz / cnt) - 9.81f;
+  }
+
+  tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextSize(2);
+  tft.print("Red:X Green:Y Blue:Z");
+}
+
+// ---------- Refresh full buffer ----------
+void refreshAllColumnsFromBuffer() {
+  for (int i = 0; i < graphW; ++i) {
+    int xpix = graphX + i;
+
+    int newX = accelToY(bufX[i]);
+    int newY = accelToY(bufY[i]);
+    int newZ = accelToY(bufZ[i]);
+
+    if (oldY_X[i] != newX) {
+      tft.drawPixel(xpix, oldY_X[i], ST77XX_BLACK);
+      tft.drawPixel(xpix, newX, ST77XX_RED);
+      oldY_X[i] = newX;
+    }
+    if (oldY_Y[i] != newY) {
+      tft.drawPixel(xpix, oldY_Y[i], ST77XX_BLACK);
+      tft.drawPixel(xpix, newY, ST77XX_GREEN);
+      oldY_Y[i] = newY;
+    }
+    if (oldY_Z[i] != newZ) {
+      tft.drawPixel(xpix, oldY_Z[i], ST77XX_BLACK);
+      tft.drawPixel(xpix, newZ, ST77XX_BLUE);
+      oldY_Z[i] = newZ;
+    }
+  }
+}
+
+// ---------- BOOT Button ----------
+void checkBootButton() {
+  int s = digitalRead(BTN_BOOT);
+
+  if (s == LOW && !pressed) {
+    pressed = true;
+    pressStart = millis();
+  }
+
+  if (s == HIGH && pressed) {
+    pressed = false;
+  }
+
+  if (pressed && millis() - pressStart >= 3000) {
+    pressed = false;
+
+    // -------------------------------
+    // 저장 모드
+    // -------------------------------
+    if (!toggleState) {
+      saveCalibration();
+
+      tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+      tft.setCursor(0, 0);
+      tft.setTextColor(ST77XX_GREEN);
+      tft.setTextSize(2);
+      tft.print("Saved!"); delay(500);
+      tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);        /// 글자 지우기
+      tft.setCursor(0, 0);
+      tft.print("Red:X Green:Y Blue:Z");
+
+      toggleState = true;
+    }
+
+    // -------------------------------
+    // 삭제 + 재캘리브레이션
+    // -------------------------------
+    else {
+      deleteCalibration();
+
+      tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+      tft.setCursor(0, 0);
+      tft.setTextColor(ST77XX_RED);
+      tft.setTextSize(2);
+      tft.print("Deleted!"); delay(500);
+      tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);        /// 글자 지우기
+      tft.setCursor(0, 0);
+      tft.print("Red:X Green:Y Blue:Z");
+
+      delay(600);
+
+      performCalibration();
+      saveCalibration();
+
+      toggleState = false;
+    }
+  }
+}
+
+// ---------------------------------------------------------
+// ---------- Setup ----------
+void setup() {
+  pinMode(BTN_BOOT, INPUT_PULLUP);
+
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+
+  tft.init(135, 240);
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+
+  // Draw border
+  tft.drawRect(graphX - 2, graphY - 2, graphW + 2, graphH + 2, ST77XX_WHITE);
+
+  // Init buffers
+  for (int i = 0; i < graphW; i++) {
+    bufX[i] = bufY[i] = bufZ[i] = 0.0f;
+    oldY_X[i] = oldY_Y[i] = oldY_Z[i] = graphY + graphH / 2;
+  }
+
+  // IMU init
+  if (!imu.begin(SDA_PIN, SCL_PIN)) {
+    tft.setCursor(5, 40);
+    tft.setTextColor(ST77XX_RED);
+    tft.setTextSize(2);
+    tft.print("IMU FAIL!");
+    while (1) delay(1000);
+  }
+
+  imu.setAccelRange(QMI8658_ACCEL_RANGE_8G);
+  imu.setAccelODR(QMI8658_ACCEL_ODR_1000HZ);
+  imu.setAccelUnit_mps2(true);
+  imu.enableSensors(QMI8658_ENABLE_ACCEL | QMI8658_ENABLE_GYRO);
+
+  // Load saved calibration
+  loadCalibration();
+
+  // ------------------------------------------------------
+  // ✔ 수정: toggleState를 calibLoaded로 동기화
+  // ------------------------------------------------------
+  toggleState = calibLoaded;
+
+  if (!calibLoaded) {
+    performCalibration();
+  } else {
+    tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);
+    tft.setCursor(0, 0);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.setTextSize(2);
+    tft.print("Loaded Calibration"); delay(500);
+    tft.fillRect(0, 0, 240, 20, ST77XX_BLACK);        /// 글자 지우기
+    tft.setCursor(0, 0);
+    tft.print("Red:X Green:Y Blue:Z");
+  }
+}
+
+// ---------------------------------------------------------
+// ---------- Loop ----------
+void loop() {
+  checkBootButton();
+
+  QMI8658_Data d;
+  if (!imu.readSensorData(d)) {
+    delay(5);
+    return;
+  }
+
+  tft.drawRect(graphX - 2, graphY - 2, graphW + 2, graphH + 2, ST77XX_WHITE);
+
+  float ax = d.accelX - accelOffsetX;
+  float ay = d.accelY - accelOffsetY;
+  float az = d.accelZ - accelOffsetZ;
+
+  fX = alpha * ax + (1 - alpha) * fX;
+  fY = alpha * ay + (1 - alpha) * fY;
+  fZ = alpha * az + (1 - alpha) * fZ;
+
+  if (graphIndex < graphW) {
+    int px = graphX + graphIndex;
+
+    bufX[graphIndex] = fX;
+    bufY[graphIndex] = fY;
+    bufZ[graphIndex] = fZ;
+
+    int newPX = accelToY(bufX[graphIndex]);
+    int newPY = accelToY(bufY[graphIndex]);
+    int newPZ = accelToY(bufZ[graphIndex]);
+
+    if (!firstFrame) {
+      tft.drawPixel(px, oldY_X[graphIndex], ST77XX_BLACK);
+      tft.drawPixel(px, oldY_Y[graphIndex], ST77XX_BLACK);
+      tft.drawPixel(px, oldY_Z[graphIndex], ST77XX_BLACK);
+    }
+
+    tft.drawPixel(px, newPX, ST77XX_RED);
+    tft.drawPixel(px, newPY, ST77XX_GREEN);
+    tft.drawPixel(px, newPZ, ST77XX_BLUE);
+
+    oldY_X[graphIndex] = newPX;
+    oldY_Y[graphIndex] = newPY;
+    oldY_Z[graphIndex] = newPZ;
+
+    graphIndex++;
+    firstFrame = false;
+  } else {
+    memmove(bufX, bufX + 1, sizeof(float) * (graphW - 1));
+    memmove(bufY, bufY + 1, sizeof(float) * (graphW - 1));
+    memmove(bufZ, bufZ + 1, sizeof(float) * (graphW - 1));
+
+    bufX[graphW - 1] = fX;
+    bufY[graphW - 1] = fY;
+    bufZ[graphW - 1] = fZ;
+
+    refreshAllColumnsFromBuffer();
+  }
+}
